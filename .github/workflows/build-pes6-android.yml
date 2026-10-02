@@ -1,0 +1,71 @@
+name: Build PES Nicaragua Android APK
+
+on:
+  push:
+    branches: [pes6-nicaragua-android-ci]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK, NDK and CMake
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager \
+            'platforms;android-35' \
+            'build-tools;35.0.0' \
+            'ndk;24.0.8215888' \
+            'cmake;3.22.1'
+
+      - name: Clone pinned Winlator 11.2 source
+        shell: bash
+        run: |
+          git clone --filter=blob:none https://github.com/brunodev85/winlator-app.git winlator
+          cd winlator
+          git checkout 3981d86efa4f333b2a34a7da8b6521476cd8c8b9
+          git lfs pull || true
+
+      - name: Apply PES Nicaragua Android patch
+        run: python3 ci/patch_winlator.py
+
+      - name: Build debug APK
+        working-directory: winlator
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/24.0.8215888
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p out
+          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.1-debug.apk
+          sha256sum out/PES_Nicaragua_Android_v0.1-debug.apk | tee out/SHA256SUMS.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PES-Nicaragua-Android-v0.1
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
