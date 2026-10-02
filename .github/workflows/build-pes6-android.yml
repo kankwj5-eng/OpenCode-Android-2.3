@@ -1,8 +1,8 @@
 name: Build PES Nicaragua Android APK
 
 on:
-  push:
-    branches: [pes6-nicaragua-android-ci]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
