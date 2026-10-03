@@ -1309,6 +1309,647 @@ test_path = ROOT / 'app/src/test/java/com/winlator/GameArchiveInspectorTest.java
 test_path.parent.mkdir(parents=True, exist_ok=True)
 test_path.write_text(test_source, encoding='utf-8')
 
+
+audited_launcher = r'''package com.winlator;
+
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.database.Cursor;
+import android.graphics.Color;
+import android.net.Uri;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.StatFs;
+import android.provider.OpenableColumns;
+import android.text.method.ScrollingMovementMethod;
+import android.view.Gravity;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.winlator.box64.Box64Preset;
+import com.winlator.container.Container;
+import com.winlator.container.ContainerManager;
+import com.winlator.container.DXWrappers;
+import com.winlator.container.GraphicsDrivers;
+import com.winlator.core.AppUtils;
+import com.winlator.core.GPUHelper;
+import com.winlator.xenvironment.RootFS;
+import com.winlator.xenvironment.RootFSInstaller;
+
+import org.json.JSONObject;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class PesLauncherActivity extends AppCompatActivity {
+    private static final String VERSION = "v0.3.0-audit";
+    private static final String CONTAINER_NAME = "PES Nicaragua";
+    private static final int COLOR_BG = 0xff11161c;
+    private static final int COLOR_PANEL = 0xff1b222b;
+    private static final int COLOR_TEXT = 0xfff4f7fb;
+    private static final int COLOR_MUTED = 0xffaab5c1;
+    private static final int COLOR_ACCENT = 0xffd51e2b;
+
+    private final Handler handler = new Handler();
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private ActivityResultLauncher<String[]> openDocumentLauncher;
+
+    private TextView statusView;
+    private TextView gpuView;
+    private Button playButton;
+    private Button importButton;
+    private Button settingsButton;
+    private Button diagnosticButton;
+    private Button technicalButton;
+    private volatile boolean busy = false;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        AppUtils.setActivityTheme(this);
+        super.onCreate(savedInstanceState);
+        registerImporter();
+        buildUi();
+        refreshUi(true);
+
+        if (!RootFS.find(this).isValid()) {
+            setBusy(true);
+            setStatus("Preparando motor de juego…");
+            RootFSInstaller.installIfNeeded(this);
+            pollRootFs();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        refreshUi(false);
+    }
+
+    @Override
+    protected void onDestroy() {
+        executor.shutdownNow();
+        super.onDestroy();
+    }
+
+    private void registerImporter() {
+        openDocumentLauncher = registerForActivityResult(
+                new ActivityResultContracts.OpenDocument(),
+                uri -> {
+                    if (uri == null) {
+                        setStatus("Selección cancelada. No se modificó el juego.");
+                        return;
+                    }
+                    try {
+                        getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    }
+                    catch (Throwable ignored) {}
+                    importPackage(uri);
+                }
+        );
+    }
+
+    private void buildUi() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setBackgroundColor(COLOR_BG);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(dp(24), dp(28), dp(24), dp(28));
+        scroll.addView(root);
+
+        TextView title = text("PES NICARAGUA", 31, COLOR_TEXT);
+        title.setGravity(Gravity.CENTER_HORIZONTAL);
+        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        root.addView(title);
+
+        TextView subtitle = text("Liga Primera • Android", 16, COLOR_MUTED);
+        subtitle.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.addView(subtitle);
+
+        TextView version = text(VERSION, 13, COLOR_MUTED);
+        version.setGravity(Gravity.CENTER_HORIZONTAL);
+        LinearLayout.LayoutParams versionParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        versionParams.setMargins(0, dp(4), 0, dp(20));
+        version.setLayoutParams(versionParams);
+        root.addView(version);
+
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(18), dp(18), dp(18), dp(18));
+        panel.setBackgroundColor(COLOR_PANEL);
+        root.addView(panel);
+
+        statusView = text("Comprobando…", 17, COLOR_TEXT);
+        panel.addView(statusView);
+
+        gpuView = text("", 14, COLOR_MUTED);
+        LinearLayout.LayoutParams gpuParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        gpuParams.setMargins(0, dp(10), 0, 0);
+        gpuView.setLayoutParams(gpuParams);
+        panel.addView(gpuView);
+
+        importButton = button("Importar ZIP / 7z");
+        importButton.setOnClickListener(v -> openDocumentLauncher.launch(new String[]{
+                "application/zip",
+                "application/x-7z-compressed",
+                "application/octet-stream",
+                "application/x-compressed",
+                "*/*"
+        }));
+        root.addView(importButton);
+
+        playButton = button("JUGAR");
+        playButton.setTextSize(21);
+        playButton.setTextColor(Color.WHITE);
+        playButton.setBackgroundColor(COLOR_ACCENT);
+        playButton.setOnClickListener(v -> launchGame());
+        root.addView(playButton);
+
+        settingsButton = button("Configurar PES 6");
+        settingsButton.setOnClickListener(v -> launchSettings());
+        root.addView(settingsButton);
+
+        diagnosticButton = button("Ver diagnóstico");
+        diagnosticButton.setOnClickListener(v -> showDiagnostic());
+        root.addView(diagnosticButton);
+
+        technicalButton = button("Modo técnico");
+        technicalButton.setOnClickListener(v -> startActivity(new Intent(this, MainActivity.class)));
+        root.addView(technicalButton);
+
+        TextView help = text(
+                "El importador copia primero el archivo elegido al almacenamiento privado, detecta ZIP/7z por su firma, extrae solo gamedata y valida PES 6 antes de reemplazar la copia anterior.",
+                14, COLOR_MUTED);
+        LinearLayout.LayoutParams helpParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        helpParams.setMargins(0, dp(14), 0, 0);
+        help.setLayoutParams(helpParams);
+        root.addView(help);
+
+        setContentView(scroll);
+    }
+
+    private int dp(int value) {
+        return Math.round(value * getResources().getDisplayMetrics().density);
+    }
+
+    private TextView text(String value, float size, int color) {
+        TextView v = new TextView(this);
+        v.setText(value);
+        v.setTextSize(size);
+        v.setTextColor(color);
+        return v;
+    }
+
+    private Button button(String value) {
+        Button b = new Button(this);
+        b.setText(value);
+        b.setAllCaps(false);
+        b.setTextSize(17);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(58));
+        params.setMargins(0, dp(8), 0, dp(8));
+        b.setLayoutParams(params);
+        return b;
+    }
+
+    private File getBaseDir() {
+        File base = getExternalFilesDir(null);
+        if (base == null) base = getFilesDir();
+        return base;
+    }
+
+    private File getGameDir() {
+        return new File(getBaseDir(), "PES6");
+    }
+
+    private File getLogFile() {
+        return new File(getFilesDir(), "pes_import.log");
+    }
+
+    private boolean isGameValid(File dir) {
+        return dir != null
+                && new File(dir, "pes6.exe").isFile()
+                && new File(dir, "dat/0_text.afs").isFile()
+                && new File(dir, "dat/e_text.afs").isFile()
+                && new File(dir, "dat/e_sound.afs").isFile();
+    }
+
+    private void refreshUi(boolean resetStatus) {
+        boolean rootReady = RootFS.find(this).isValid();
+        boolean gameReady = isGameValid(getGameDir());
+
+        String renderer;
+        try {
+            renderer = GPUHelper.glGetRenderer(this);
+        }
+        catch (Throwable t) {
+            renderer = "GPU Android";
+        }
+
+        boolean adreno = renderer.toLowerCase(Locale.ENGLISH).contains("adreno");
+        gpuView.setText("GPU: " + renderer + "\nPerfil: " +
+                (adreno ? "Adreno / Turnip + DXVK" : "Mali-Xclipse / Vortek + WineD3D"));
+
+        playButton.setEnabled(rootReady && gameReady && !busy);
+        settingsButton.setEnabled(rootReady && gameReady && !busy);
+        importButton.setEnabled(rootReady && !busy);
+        diagnosticButton.setEnabled(getLogFile().isFile());
+        technicalButton.setEnabled(!busy);
+
+        if (resetStatus && !busy) {
+            if (!rootReady) setStatus("Motor: preparando…");
+            else if (gameReady) setStatus("Motor listo ✓\nJuego base importado y validado ✓");
+            else setStatus("Motor listo ✓\nFalta importar el juego.");
+        }
+    }
+
+    private void setBusy(boolean value) {
+        busy = value;
+        handler.post(() -> refreshUi(false));
+    }
+
+    private void setStatus(String text) {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) {
+            statusView.setText(text);
+        }
+        else {
+            handler.post(() -> statusView.setText(text));
+        }
+    }
+
+    private synchronized void log(String stage, String message) {
+        try {
+            String time = new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
+            String line = time + " [" + stage + "] " + message + "\n";
+            try (FileOutputStream out = new FileOutputStream(getLogFile(), true)) {
+                out.write(line.getBytes(StandardCharsets.UTF_8));
+            }
+        }
+        catch (Throwable ignored) {}
+    }
+
+    private void resetLog() {
+        try {
+            if (getLogFile().exists()) getLogFile().delete();
+            log("APP", VERSION + " inicio de importación");
+        }
+        catch (Throwable ignored) {}
+    }
+
+    private void showDiagnostic() {
+        String content = "Sin diagnóstico.";
+        try {
+            if (getLogFile().isFile()) {
+                byte[] bytes = Files.readAllBytes(getLogFile().toPath());
+                int start = Math.max(0, bytes.length - 24000);
+                content = new String(bytes, start, bytes.length - start, StandardCharsets.UTF_8);
+            }
+        }
+        catch (Throwable e) {
+            content = e.toString();
+        }
+
+        TextView textView = new TextView(this);
+        textView.setText(content);
+        textView.setTextIsSelectable(true);
+        textView.setMovementMethod(new ScrollingMovementMethod());
+        textView.setPadding(dp(18), dp(18), dp(18), dp(18));
+
+        new AlertDialog.Builder(this)
+                .setTitle("Diagnóstico de importación")
+                .setView(textView)
+                .setPositiveButton("Cerrar", null)
+                .show();
+    }
+
+    private String documentName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri,
+                new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0 && !cursor.isNull(index)) return cursor.getString(index);
+            }
+        }
+        catch (Throwable ignored) {}
+        String fallback = uri.getLastPathSegment();
+        return fallback != null ? fallback : "archivo";
+    }
+
+    private long documentSize(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri,
+                new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.SIZE);
+                if (index >= 0 && !cursor.isNull(index)) return cursor.getLong(index);
+            }
+        }
+        catch (Throwable ignored) {}
+        return -1;
+    }
+
+    private void importPackage(Uri uri) {
+        if (busy) return;
+        setBusy(true);
+        resetLog();
+
+        final String name = documentName(uri);
+        final long size = documentSize(uri);
+        log("SELECT", "uri=" + uri + " scheme=" + uri.getScheme() + " name=" + name + " size=" + size);
+        setStatus("Archivo recibido: " + name + "\nCopiando a almacenamiento privado…");
+
+        executor.execute(() -> {
+            File workDir = new File(getCacheDir(), "pes_import");
+            File localArchive = new File(workDir, "source.pkg");
+            File staging = new File(getBaseDir(), "PES6.new");
+            File backup = new File(getBaseDir(), "PES6.old");
+
+            try {
+                deleteRecursive(workDir);
+                if (!workDir.mkdirs() && !workDir.isDirectory()) throw new Exception("No pude crear la carpeta de importación.");
+                deleteRecursive(staging);
+
+                copyUriToLocal(uri, localArchive, size);
+                log("COPY", "copiado=" + localArchive.length());
+
+                GameArchiveInspector.Inspection inspection = GameArchiveInspector.inspect(localArchive);
+                log("INSPECT", "type=" + inspection.type + " prefix=" + inspection.prefix +
+                        " files=" + inspection.fileCount + " bytes=" + inspection.totalUncompressedBytes);
+
+                long free = new StatFs(getBaseDir().getAbsolutePath()).getAvailableBytes();
+                long needed = inspection.totalUncompressedBytes + (192L * 1024L * 1024L);
+                log("SPACE", "free=" + free + " needed=" + needed);
+                if (free < needed) {
+                    throw new Exception("Espacio insuficiente: hacen falta aproximadamente " +
+                            (needed / (1024L * 1024L)) + " MB libres.");
+                }
+
+                setStatus("Paquete válido: " + inspection.type + "\nExtrayendo PES 6…");
+                final long[] lastUi = {0};
+                GameArchiveInspector.extract(localArchive, inspection, staging, (written, total) -> {
+                    if (written - lastUi[0] < 8L * 1024L * 1024L && written < total) return;
+                    lastUi[0] = written;
+                    int percent = total > 0 ? (int)Math.min(100, (written * 100L) / total) : 0;
+                    setStatus("Extrayendo PES 6… " + percent + "%");
+                });
+
+                neutralizeLocalOnly(staging);
+                if (!isGameValid(staging)) throw new Exception("La extracción terminó, pero faltan archivos críticos.");
+                log("VALIDATE", "staging válido");
+
+                deleteRecursive(backup);
+                File game = getGameDir();
+                if (game.exists() && !game.renameTo(backup)) {
+                    throw new Exception("No pude apartar la instalación anterior.");
+                }
+
+                if (!staging.renameTo(game)) {
+                    if (backup.exists()) backup.renameTo(game);
+                    throw new Exception("No pude activar la instalación nueva.");
+                }
+
+                if (!isGameValid(game)) {
+                    deleteRecursive(game);
+                    if (backup.exists()) backup.renameTo(game);
+                    throw new Exception("La instalación final no pasó la validación.");
+                }
+
+                deleteRecursive(backup);
+                deleteRecursive(workDir);
+                log("DONE", "importación base completada");
+
+                handler.post(() -> {
+                    setBusy(false);
+                    setStatus("Importación completada ✓\nPES 6 base listo. Pulsa JUGAR.");
+                    refreshUi(false);
+                });
+            }
+            catch (Throwable e) {
+                log("ERROR", e.getClass().getName() + ": " + String.valueOf(e.getMessage()));
+                deleteRecursive(staging);
+                deleteRecursive(workDir);
+                handler.post(() -> {
+                    setBusy(false);
+                    setStatus("ERROR DE IMPORTACIÓN\n" + e.getClass().getSimpleName() + ": " +
+                            String.valueOf(e.getMessage()) + "\nAbre «Ver diagnóstico» para el detalle.");
+                    refreshUi(false);
+                });
+            }
+        });
+    }
+
+    private void copyUriToLocal(Uri uri, File out, long expectedSize) throws Exception {
+        try (InputStream raw = getContentResolver().openInputStream(uri)) {
+            if (raw == null) throw new Exception("Android no entregó un flujo de lectura para el archivo.");
+            try (BufferedInputStream in = new BufferedInputStream(raw, 128 * 1024);
+                 BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), 128 * 1024)) {
+                byte[] buffer = new byte[128 * 1024];
+                long copied = 0;
+                long nextUi = 8L * 1024L * 1024L;
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    bout.write(buffer, 0, read);
+                    copied += read;
+                    if (copied >= nextUi) {
+                        nextUi += 8L * 1024L * 1024L;
+                        int percent = expectedSize > 0 ? (int)Math.min(100, (copied * 100L) / expectedSize) : -1;
+                        setStatus(percent >= 0
+                                ? "Copiando archivo… " + percent + "%"
+                                : "Copiando archivo… " + (copied / (1024L * 1024L)) + " MB");
+                    }
+                }
+            }
+        }
+        if (out.length() <= 0) throw new Exception("El archivo seleccionado llegó vacío.");
+    }
+
+    private void neutralizeLocalOnly(File gameDir) {
+        deleteRecursive(new File(gameDir, "bonus"));
+        deleteRecursive(new File(gameDir, "scripts/optiprojects.asi"));
+
+        File fixes = new File(gameDir, "scripts/6Fixes.ini");
+        if (fixes.isFile()) {
+            try {
+                String text = new String(Files.readAllBytes(fixes.toPath()), StandardCharsets.UTF_8);
+                text = text.replaceAll("(?m)^Server=.*$", "Server=127.0.0.1");
+                text = text.replaceAll("(?m)^RedirectSaveFolder=.*$", "RedirectSaveFolder=1");
+                Files.write(fixes.toPath(), text.getBytes(StandardCharsets.UTF_8));
+                log("SANITIZE", "6Fixes conservado; servidor neutralizado");
+            }
+            catch (Throwable e) {
+                log("SANITIZE", "No pude ajustar 6Fixes.ini: " + e);
+            }
+        }
+    }
+
+    private void pollRootFs() {
+        handler.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (isFinishing()) return;
+                if (RootFS.find(PesLauncherActivity.this).isValid()) {
+                    setBusy(false);
+                    refreshUi(true);
+                }
+                else handler.postDelayed(this, 1200);
+            }
+        }, 1200);
+    }
+
+    private Container getPesContainer() {
+        if (!RootFS.find(this).isValid()) return null;
+        ContainerManager manager = new ContainerManager(this);
+        for (Container container : manager.getContainers()) {
+            if (CONTAINER_NAME.equals(container.getName())) return container;
+        }
+        return null;
+    }
+
+    private void ensurePesContainer(Runnable callback) {
+        if (!RootFS.find(this).isValid()) {
+            setStatus("El motor todavía no está listo.");
+            return;
+        }
+
+        ContainerManager manager = new ContainerManager(this);
+        Container existing = getPesContainer();
+
+        boolean adreno;
+        try {
+            adreno = GPUHelper.getAdrenoModelId(this) > 0;
+        }
+        catch (Throwable t) {
+            adreno = false;
+        }
+
+        String graphicsDriver = adreno
+                ? GraphicsDrivers.TURNIP + "," + GraphicsDrivers.GLADIO
+                : GraphicsDrivers.VORTEK + "," + GraphicsDrivers.GLADIO;
+        String dxwrapper = adreno ? DXWrappers.DXVK : DXWrappers.WINED3D;
+
+        if (existing != null) {
+            configureContainer(existing, graphicsDriver, dxwrapper);
+            if (callback != null) callback.run();
+            return;
+        }
+
+        try {
+            JSONObject data = new JSONObject();
+            data.put("name", CONTAINER_NAME);
+            data.put("screenSize", "960x540");
+            data.put("envVars", Container.DEFAULT_ENV_VARS);
+            data.put("graphicsDriver", graphicsDriver);
+            data.put("dxwrapper", dxwrapper);
+            data.put("audioDriver", Container.DEFAULT_AUDIO_DRIVER);
+            data.put("wincomponents", Container.DEFAULT_WINCOMPONENTS);
+            data.put("drives", "D:" + getGameDir().getAbsolutePath());
+            data.put("hudMode", 0);
+            data.put("startupSelection", Container.STARTUP_SELECTION_ESSENTIAL);
+            data.put("box64Preset", Box64Preset.PERFORMANCE);
+            data.put("cpuList", Container.getFallbackCPUList());
+            data.put("cpuListWoW64", Container.getFallbackCPUList());
+
+            setBusy(true);
+            setStatus("Preparando entorno PES Nicaragua…");
+            manager.createContainerAsync(data, container -> runOnUiThread(() -> {
+                setBusy(false);
+                if (container == null) {
+                    setStatus("ERROR: no se pudo crear el entorno. Abre «Ver diagnóstico».");
+                    log("CONTAINER", "createContainerAsync devolvió null");
+                    return;
+                }
+                configureContainer(container, graphicsDriver, dxwrapper);
+                if (callback != null) callback.run();
+            }));
+        }
+        catch (Throwable e) {
+            setBusy(false);
+            log("CONTAINER", e.toString());
+            setStatus("ERROR preparando entorno: " + e.getMessage());
+        }
+    }
+
+    private void configureContainer(Container container, String graphicsDriver, String dxwrapper) {
+        container.setScreenSize("960x540");
+        container.setGraphicsDriver(graphicsDriver);
+        container.setDXWrapper(dxwrapper);
+        container.setAudioDriver(Container.DEFAULT_AUDIO_DRIVER);
+        container.setWinComponents(Container.DEFAULT_WINCOMPONENTS);
+        container.setDrives("D:" + getGameDir().getAbsolutePath());
+        container.setStartupSelection(Container.STARTUP_SELECTION_ESSENTIAL);
+        container.setBox64Preset(Box64Preset.PERFORMANCE);
+        container.setCPUList(Container.getFallbackCPUList());
+        container.setCPUListWoW64(Container.getFallbackCPUList());
+        container.saveData();
+        log("CONTAINER", "id=" + container.id + " gpu=" + graphicsDriver + " dx=" + dxwrapper);
+    }
+
+    private void launchGame() {
+        if (!isGameValid(getGameDir())) {
+            setStatus("Primero importa el juego.");
+            return;
+        }
+        ensurePesContainer(() -> launchExecutable(new File(getGameDir(), "pes6.exe"), true));
+    }
+
+    private void launchSettings() {
+        File exe = new File(getGameDir(), "settings.exe");
+        if (!exe.isFile()) {
+            setStatus("No se encontró settings.exe.");
+            return;
+        }
+        ensurePesContainer(() -> launchExecutable(exe, false));
+    }
+
+    private void launchExecutable(File exe, boolean controls) {
+        Container container = getPesContainer();
+        if (container == null) {
+            setStatus("No hay entorno listo.");
+            return;
+        }
+
+        Intent intent = new Intent(this, XServerDisplayActivity.class);
+        intent.putExtra("container_id", container.id);
+        intent.putExtra("exec_path", exe.getAbsolutePath());
+        if (controls) intent.putExtra("pes_nicaragua", true);
+        log("LAUNCH", exe.getName() + " container=" + container.id);
+        startActivity(intent);
+    }
+
+    private void deleteRecursive(File file) {
+        if (file == null || !file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteRecursive(child);
+        }
+        file.delete();
+    }
+}
+'''
+launcher_path.write_text(audited_launcher, encoding='utf-8')
+
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
 marker.write_text('PES Nicaragua Android Runtime v0.3.0-audit\nBase: Winlator 11.2\nAudited SAF importer + package-path fixes + import tests.\n', encoding='utf-8')
 print('Applied PES Nicaragua Android v0.3.0-audit patch')
