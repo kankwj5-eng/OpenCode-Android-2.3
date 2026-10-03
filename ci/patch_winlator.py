@@ -961,6 +961,354 @@ public class PesLauncherActivity extends AppCompatActivity {
 launcher_path = ROOT / 'app/src/main/java/com/winlator/PesLauncherActivity.java'
 launcher_path.write_text(launcher, encoding='utf-8')
 
+
+# Pure-Java archive inspector used by the audited importer and CI tests.
+inspector = r'''package com.winlator;
+
+import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry;
+import org.apache.commons.compress.archivers.sevenz.SevenZFile;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Enumeration;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+
+public final class GameArchiveInspector {
+    public enum ArchiveType { ZIP, SEVEN_Z }
+
+    public interface ProgressCallback {
+        void onProgress(long written, long total);
+    }
+
+    public static final class Inspection {
+        public final ArchiveType type;
+        public final String prefix;
+        public final long totalUncompressedBytes;
+        public final int fileCount;
+
+        Inspection(ArchiveType type, String prefix, long totalUncompressedBytes, int fileCount) {
+            this.type = type;
+            this.prefix = prefix;
+            this.totalUncompressedBytes = totalUncompressedBytes;
+            this.fileCount = fileCount;
+        }
+    }
+
+    private static final String[] REQUIRED = new String[]{
+            "pes6.exe",
+            "dat/0_text.afs",
+            "dat/e_text.afs",
+            "dat/e_sound.afs"
+    };
+
+    private GameArchiveInspector() {}
+
+    public static ArchiveType detectType(File archive) throws IOException {
+        byte[] head = new byte[6];
+        try (InputStream in = new BufferedInputStream(new FileInputStream(archive))) {
+            int read = in.read(head);
+            if (read >= 4 && head[0] == 0x50 && head[1] == 0x4b &&
+                    ((head[2] == 0x03 && head[3] == 0x04) ||
+                     (head[2] == 0x05 && head[3] == 0x06) ||
+                     (head[2] == 0x07 && head[3] == 0x08))) {
+                return ArchiveType.ZIP;
+            }
+            if (read >= 6 &&
+                    (head[0] & 0xff) == 0x37 && (head[1] & 0xff) == 0x7a &&
+                    (head[2] & 0xff) == 0xbc && (head[3] & 0xff) == 0xaf &&
+                    (head[4] & 0xff) == 0x27 && (head[5] & 0xff) == 0x1c) {
+                return ArchiveType.SEVEN_Z;
+            }
+        }
+        throw new IOException("Formato no reconocido: el archivo no es ZIP ni 7z.");
+    }
+
+    public static Inspection inspect(File archive) throws IOException {
+        ArchiveType type = detectType(archive);
+        List<EntryMeta> entries = type == ArchiveType.ZIP ? listZip(archive) : listSevenZ(archive);
+        String prefix = findGamePrefix(entries);
+        if (prefix == null) {
+            throw new IOException("No encontré pes6.exe junto con dat/0_text.afs, dat/e_text.afs y dat/e_sound.afs.");
+        }
+
+        long total = 0;
+        int count = 0;
+        for (EntryMeta meta : entries) {
+            if (meta.directory || !meta.name.startsWith(prefix)) continue;
+            String relative = meta.name.substring(prefix.length());
+            if (relative.isEmpty() || shouldSkip(relative)) continue;
+            total += Math.max(0, meta.size);
+            count++;
+        }
+        if (count == 0) throw new IOException("La carpeta gamedata está vacía.");
+        return new Inspection(type, prefix, total, count);
+    }
+
+    public static void extract(File archive, Inspection inspection, File outputDir, ProgressCallback callback) throws IOException {
+        if (outputDir.exists()) deleteRecursive(outputDir);
+        if (!outputDir.mkdirs() && !outputDir.isDirectory()) {
+            throw new IOException("No pude crear la carpeta temporal del juego.");
+        }
+        if (inspection.type == ArchiveType.ZIP) extractZip(archive, inspection, outputDir, callback);
+        else extractSevenZ(archive, inspection, outputDir, callback);
+    }
+
+    static String findGamePrefixForTest(Collection<String> names) {
+        List<EntryMeta> entries = new ArrayList<>();
+        for (String name : names) entries.add(new EntryMeta(normalize(name), 1, false));
+        return findGamePrefix(entries);
+    }
+
+    private static String findGamePrefix(List<EntryMeta> entries) {
+        Set<String> lower = new HashSet<>();
+        for (EntryMeta meta : entries) lower.add(meta.name.toLowerCase(Locale.ENGLISH));
+
+        String best = null;
+        for (EntryMeta meta : entries) {
+            if (meta.directory) continue;
+            String nameLower = meta.name.toLowerCase(Locale.ENGLISH);
+            if (!(nameLower.equals("pes6.exe") || nameLower.endsWith("/pes6.exe"))) continue;
+
+            String prefix = meta.name.substring(0, meta.name.length() - "pes6.exe".length());
+            String prefixLower = prefix.toLowerCase(Locale.ENGLISH);
+            boolean ok = true;
+            for (String required : REQUIRED) {
+                if (!lower.contains(prefixLower + required)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok && (best == null || prefix.length() < best.length())) best = prefix;
+        }
+        return best;
+    }
+
+    private static List<EntryMeta> listZip(File archive) throws IOException {
+        List<EntryMeta> result = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(archive)) {
+            Enumeration<? extends ZipEntry> enumeration = zip.entries();
+            while (enumeration.hasMoreElements()) {
+                ZipEntry entry = enumeration.nextElement();
+                result.add(new EntryMeta(normalize(entry.getName()), entry.getSize(), entry.isDirectory()));
+            }
+        }
+        return result;
+    }
+
+    private static List<EntryMeta> listSevenZ(File archive) throws IOException {
+        List<EntryMeta> result = new ArrayList<>();
+        try (SevenZFile sevenZ = new SevenZFile(archive)) {
+            SevenZArchiveEntry entry;
+            while ((entry = sevenZ.getNextEntry()) != null) {
+                result.add(new EntryMeta(normalize(entry.getName()), entry.getSize(), entry.isDirectory()));
+            }
+        }
+        return result;
+    }
+
+    private static void extractZip(File archive, Inspection inspection, File outputDir, ProgressCallback callback) throws IOException {
+        long written = 0;
+        byte[] buffer = new byte[128 * 1024];
+        try (ZipFile zip = new ZipFile(archive)) {
+            Enumeration<? extends ZipEntry> enumeration = zip.entries();
+            while (enumeration.hasMoreElements()) {
+                ZipEntry entry = enumeration.nextElement();
+                String name = normalize(entry.getName());
+                if (!name.startsWith(inspection.prefix)) continue;
+                String relative = name.substring(inspection.prefix.length());
+                if (relative.isEmpty() || shouldSkip(relative)) continue;
+
+                File out = safeTarget(outputDir, relative);
+                if (entry.isDirectory()) {
+                    if (!out.mkdirs() && !out.isDirectory()) throw new IOException("No pude crear " + relative);
+                    continue;
+                }
+
+                File parent = out.getParentFile();
+                if (parent != null && !parent.mkdirs() && !parent.isDirectory()) throw new IOException("No pude crear " + parent.getName());
+
+                try (InputStream in = new BufferedInputStream(zip.getInputStream(entry), buffer.length);
+                     BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), buffer.length)) {
+                    int read;
+                    while ((read = in.read(buffer)) != -1) {
+                        bout.write(buffer, 0, read);
+                        written += read;
+                        if (callback != null) callback.onProgress(written, inspection.totalUncompressedBytes);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void extractSevenZ(File archive, Inspection inspection, File outputDir, ProgressCallback callback) throws IOException {
+        long written = 0;
+        byte[] buffer = new byte[128 * 1024];
+        try (SevenZFile sevenZ = new SevenZFile(archive)) {
+            SevenZArchiveEntry entry;
+            while ((entry = sevenZ.getNextEntry()) != null) {
+                String name = normalize(entry.getName());
+                if (!name.startsWith(inspection.prefix)) continue;
+                String relative = name.substring(inspection.prefix.length());
+                if (relative.isEmpty() || shouldSkip(relative)) continue;
+
+                File out = safeTarget(outputDir, relative);
+                if (entry.isDirectory()) {
+                    if (!out.mkdirs() && !out.isDirectory()) throw new IOException("No pude crear " + relative);
+                    continue;
+                }
+
+                File parent = out.getParentFile();
+                if (parent != null && !parent.mkdirs() && !parent.isDirectory()) throw new IOException("No pude crear " + parent.getName());
+
+                try (BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), buffer.length)) {
+                    int read;
+                    while ((read = sevenZ.read(buffer)) > 0) {
+                        bout.write(buffer, 0, read);
+                        written += read;
+                        if (callback != null) callback.onProgress(written, inspection.totalUncompressedBytes);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean shouldSkip(String relative) {
+        String lower = normalize(relative).toLowerCase(Locale.ENGLISH);
+        return lower.startsWith("bonus/") || lower.equals("scripts/optiprojects.asi");
+    }
+
+    private static File safeTarget(File root, String relative) throws IOException {
+        File target = new File(root, relative);
+        String rootPath = root.getCanonicalPath() + File.separator;
+        String targetPath = target.getCanonicalPath();
+        if (!targetPath.startsWith(rootPath)) throw new IOException("Ruta insegura dentro del archivo: " + relative);
+        return target;
+    }
+
+    static String normalize(String name) {
+        if (name == null) return "";
+        String out = name.replace('\\', '/');
+        while (out.startsWith("/")) out = out.substring(1);
+        while (out.contains("//")) out = out.replace("//", "/");
+        return out;
+    }
+
+    private static void deleteRecursive(File file) {
+        if (file == null || !file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) for (File child : children) deleteRecursive(child);
+        }
+        file.delete();
+    }
+
+    private static final class EntryMeta {
+        final String name;
+        final long size;
+        final boolean directory;
+
+        EntryMeta(String name, long size, boolean directory) {
+            this.name = name;
+            this.size = size;
+            this.directory = directory;
+        }
+    }
+}
+'''
+(ROOT / 'app/src/main/java/com/winlator/GameArchiveInspector.java').write_text(inspector, encoding='utf-8')
+
+test_source = r'''package com.winlator;
+
+import org.junit.Test;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.util.Arrays;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import static org.junit.Assert.*;
+
+public class GameArchiveInspectorTest {
+    @Test
+    public void findsOriginalPortableLayout() {
+        String prefix = GameArchiveInspector.findGamePrefixForTest(Arrays.asList(
+                "PES 6 PORTABLE RIP OptiJuegos/Install/gamedata/pes6.exe",
+                "PES 6 PORTABLE RIP OptiJuegos/Install/gamedata/settings.exe",
+                "PES 6 PORTABLE RIP OptiJuegos/Install/gamedata/dat/0_text.afs",
+                "PES 6 PORTABLE RIP OptiJuegos/Install/gamedata/dat/e_text.afs",
+                "PES 6 PORTABLE RIP OptiJuegos/Install/gamedata/dat/e_sound.afs"
+        ));
+        assertEquals("PES 6 PORTABLE RIP OptiJuegos/Install/gamedata/", prefix);
+    }
+
+    @Test
+    public void rejectsIncompletePackage() {
+        assertNull(GameArchiveInspector.findGamePrefixForTest(Arrays.asList(
+                "gamedata/pes6.exe",
+                "gamedata/dat/0_text.afs",
+                "gamedata/dat/e_text.afs"
+        )));
+    }
+
+    @Test
+    public void detectsAndInspectsZipByMagicNotExtension() throws Exception {
+        File temp = File.createTempFile("pes6-import-", ".bin");
+        try {
+            try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(temp))) {
+                for (String name : Arrays.asList(
+                        "root/gamedata/pes6.exe",
+                        "root/gamedata/dat/0_text.afs",
+                        "root/gamedata/dat/e_text.afs",
+                        "root/gamedata/dat/e_sound.afs",
+                        "root/gamedata/scripts/6Fixes.asi"
+                )) {
+                    zip.putNextEntry(new ZipEntry(name));
+                    zip.write(new byte[]{1,2,3,4});
+                    zip.closeEntry();
+                }
+            }
+            assertEquals(GameArchiveInspector.ArchiveType.ZIP, GameArchiveInspector.detectType(temp));
+            GameArchiveInspector.Inspection inspection = GameArchiveInspector.inspect(temp);
+            assertEquals("root/gamedata/", inspection.prefix);
+            assertTrue(inspection.fileCount >= 4);
+        }
+        finally {
+            temp.delete();
+        }
+    }
+
+    @Test
+    public void detectsSevenZSignature() throws Exception {
+        File temp = File.createTempFile("pes6-7z-", ".bin");
+        try {
+            try (FileOutputStream out = new FileOutputStream(temp)) {
+                out.write(new byte[]{0x37,0x7a,(byte)0xbc,(byte)0xaf,0x27,0x1c,0,0});
+            }
+            assertEquals(GameArchiveInspector.ArchiveType.SEVEN_Z, GameArchiveInspector.detectType(temp));
+        }
+        finally {
+            temp.delete();
+        }
+    }
+}
+'''
+test_path = ROOT / 'app/src/test/java/com/winlator/GameArchiveInspectorTest.java'
+test_path.parent.mkdir(parents=True, exist_ok=True)
+test_path.write_text(test_source, encoding='utf-8')
+
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
 marker.write_text('PES Nicaragua Android Runtime v0.3.0-audit\nBase: Winlator 11.2\nAudited SAF importer + package-path fixes + import tests.\n', encoding='utf-8')
 print('Applied PES Nicaragua Android v0.3.0-audit patch')
