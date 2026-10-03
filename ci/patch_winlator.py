@@ -12,11 +12,32 @@ def replace(path, old, new):
 
 # App identity
 replace('app/build.gradle', "applicationId 'com.winlator'", "applicationId 'com.pesnicaragua.android'")
-replace('app/build.gradle', 'versionCode 33', 'versionCode 1007')
-replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.5"')
+replace('app/build.gradle', 'versionCode 33', 'versionCode 1100')
+replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.3.0-audit"')
 replace('app/src/main/res/values/strings.xml', '<string name="app_name">Winlator</string>', '<string name="app_name">PES Nicaragua</string>')
 replace('app/src/main/AndroidManifest.xml', 'android:authorities="com.winlator.FileProvider"', 'android:authorities="com.pesnicaragua.android.FileProvider"')
 replace('app/src/main/java/com/winlator/core/FileUtils.java', '"com.winlator.FileProvider"', 'activity.getPackageName()+".FileProvider"')
+
+replace('app/src/main/java/com/winlator/core/AppUtils.java',
+        'public static final String INTERNAL_STORAGE = "/data/data/com.winlator/storage";',
+        'public static final String INTERNAL_STORAGE = "/data/data/com.pesnicaragua.android/storage";')
+replace('app/src/main/cpp/winlator/include/winlator.h',
+        '#define APP_CACHE_DIR "/data/data/com.winlator/cache"',
+        '#define APP_CACHE_DIR "/data/data/com.pesnicaragua.android/cache"')
+replace('app/src/main/cpp/vortekrenderer/include/vortek.h',
+        '#define VORTEK_SERVER_PATH "/data/data/com.winlator/files/rootfs/tmp/.vortek/V0"',
+        '#define VORTEK_SERVER_PATH "/data/data/com.pesnicaragua.android/files/rootfs/tmp/.vortek/V0"')
+replace('app/src/main/cpp/gladiorenderer/include/gladio.h',
+        '#define X11_SERVER_PATH "/data/data/com.winlator/files/rootfs/tmp/.X11-unix/X0"',
+        '#define X11_SERVER_PATH "/data/data/com.pesnicaragua.android/files/rootfs/tmp/.X11-unix/X0"')
+
+gradle_path = ROOT / 'app/build.gradle'
+gradle_text = gradle_path.read_text(encoding='utf-8')
+gradle_text = gradle_text.replace(
+    "    implementation 'androidx.lifecycle:lifecycle-process:2.5.1'\n",
+    "    implementation 'androidx.lifecycle:lifecycle-process:2.5.1'\n    testImplementation 'junit:junit:4.13.2'\n"
+)
+gradle_path.write_text(gradle_text, encoding='utf-8')
 
 # RootFS installer usable by the dedicated launcher.
 replace('app/src/main/java/com/winlator/xenvironment/RootFSInstaller.java',
@@ -941,5 +962,5 @@ launcher_path = ROOT / 'app/src/main/java/com/winlator/PesLauncherActivity.java'
 launcher_path.write_text(launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
-marker.write_text('PES Nicaragua Android Runtime v0.2.5\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
-print('Applied PES Nicaragua Android v0.2.5 patch')
+marker.write_text('PES Nicaragua Android Runtime v0.3.0-audit\nBase: Winlator 11.2\nAudited SAF importer + package-path fixes + import tests.\n', encoding='utf-8')
+print('Applied PES Nicaragua Android v0.3.0-audit patch')
