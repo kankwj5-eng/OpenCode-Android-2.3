@@ -12,8 +12,8 @@ def replace(path, old, new):
 
 # App identity
 replace('app/build.gradle', "applicationId 'com.winlator'", "applicationId 'com.pesnicaragua.android'")
-replace('app/build.gradle', 'versionCode 33', 'versionCode 1005')
-replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.3"')
+replace('app/build.gradle', 'versionCode 33', 'versionCode 1006')
+replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.4"')
 replace('app/src/main/res/values/strings.xml', '<string name="app_name">Winlator</string>', '<string name="app_name">PES Nicaragua</string>')
 replace('app/src/main/AndroidManifest.xml', 'android:authorities="com.winlator.FileProvider"', 'android:authorities="com.pesnicaragua.android.FileProvider"')
 replace('app/src/main/java/com/winlator/core/FileUtils.java', '"com.winlator.FileProvider"', 'activity.getPackageName()+".FileProvider"')
@@ -149,6 +149,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 
@@ -191,6 +193,9 @@ public class PesLauncherActivity extends AppCompatActivity {
 
     private final Handler handler = new Handler();
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private ActivityResultLauncher<Intent> importLauncher;
+    private boolean filePickerOpen = false;
+    private boolean importInProgress = false;
 
     private TextView statusView;
     private TextView gpuView;
@@ -204,6 +209,7 @@ public class PesLauncherActivity extends AppCompatActivity {
         AppUtils.setActivityTheme(this);
         super.onCreate(savedInstanceState);
         installCrashLogger();
+        registerImportLauncher();
         buildUi();
         showPreviousCrashIfAny();
         refreshUi();
@@ -222,7 +228,7 @@ public class PesLauncherActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        refreshUi();
+        if (!filePickerOpen && !importInProgress) refreshUi();
     }
 
     @Override
@@ -393,24 +399,46 @@ public class PesLauncherActivity extends AppCompatActivity {
         }, 1200);
     }
 
+    private void registerImportLauncher() {
+        importLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartActivityForResult(),
+                result -> {
+                    filePickerOpen = false;
+                    Intent data = result.getData();
+                    if (result.getResultCode() != Activity.RESULT_OK || data == null || data.getData() == null) {
+                        statusView.setText("No se seleccionó ningún archivo.");
+                        refreshUi();
+                        return;
+                    }
+
+                    Uri uri = data.getData();
+                    try {
+                        int flags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+                        if (flags != 0) getContentResolver().takePersistableUriPermission(uri, flags);
+                    }
+                    catch (Throwable ignored) {}
+
+                    String selectedName = getDisplayName(uri);
+                    statusView.setText("Archivo seleccionado: " + selectedName + "\nIniciando importación…");
+                    importGamePackage(uri);
+                }
+        );
+    }
+
     private void chooseGamePackage() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
                 "application/zip",
                 "application/x-7z-compressed",
-                "application/octet-stream"
+                "application/octet-stream",
+                "application/x-compressed"
         });
-        startActivityForResult(intent, REQUEST_IMPORT);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == REQUEST_IMPORT && resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
-            importGamePackage(data.getData());
-        }
+        filePickerOpen = true;
+        statusView.setText("Selecciona el ZIP o .7z del juego…");
+        importLauncher.launch(intent);
     }
 
     private File getCrashLogFile() {
@@ -500,9 +528,11 @@ public class PesLauncherActivity extends AppCompatActivity {
     }
 
     private void importGamePackage(Uri uri) {
+        importInProgress = true;
         setMainButtonsEnabled(false);
         AppUtils.keepScreenOn(this);
-        statusView.setText("Analizando paquete del juego…");
+        String selectedName = getDisplayName(uri);
+        statusView.setText("Archivo seleccionado: " + selectedName + "\nAnalizando paquete…");
 
         executor.execute(() -> {
             File temp = new File(getBaseDir(), "PES6_importando");
@@ -514,7 +544,10 @@ public class PesLauncherActivity extends AppCompatActivity {
             try {
                 if (!hasEnoughSpace(uri)) {
                     deleteRecursive(temp);
-                    handler.post(this::refreshUi);
+                    handler.post(() -> {
+                        importInProgress = false;
+                        refreshUi();
+                    });
                     return;
                 }
 
@@ -557,6 +590,7 @@ public class PesLauncherActivity extends AppCompatActivity {
                 getCrashLogFile().delete();
 
                 handler.post(() -> {
+                    importInProgress = false;
                     statusView.setText("Juego importado y verificado ✓\nPulsa JUGAR para preparar el entorno.");
                     refreshUi();
                 });
@@ -566,6 +600,7 @@ public class PesLauncherActivity extends AppCompatActivity {
                 deleteRecursive(temp);
                 deleteRecursive(sevenZipTemp);
                 handler.post(() -> {
+                    importInProgress = false;
                     statusView.setText("Importación detenida: " + e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage()));
                     refreshUi();
                 });
@@ -825,5 +860,5 @@ launcher_path = ROOT / 'app/src/main/java/com/winlator/PesLauncherActivity.java'
 launcher_path.write_text(launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
-marker.write_text('PES Nicaragua Android Runtime v0.2.3\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
-print('Applied PES Nicaragua Android v0.2.3 patch')
+marker.write_text('PES Nicaragua Android Runtime v0.2.4\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
+print('Applied PES Nicaragua Android v0.2.4 patch')
