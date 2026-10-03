@@ -1,0 +1,104 @@
+name: Build PES Nicaragua Android APK
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout build scripts
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+
+      - name: Install Android SDK, NDK and CMake
+        shell: bash
+        run: |
+          sdkmanager --version
+          sdkmanager \
+            'platforms;android-35' \
+            'build-tools;35.0.0' \
+            'ndk;24.0.8215888' \
+            'cmake;3.22.1'
+
+      - name: Clone pinned Winlator 11.2 source
+        shell: bash
+        run: |
+          git clone --filter=blob:none https://github.com/brunodev85/winlator-app.git winlator
+          cd winlator
+          git checkout 3981d86efa4f333b2a34a7da8b6521476cd8c8b9
+          git lfs pull || true
+
+      - name: Apply PES Nicaragua Android patch
+        run: python3 ci/patch_winlator.py
+
+      - name: Install stable debug signing key
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android"
+          base64 -d ci/pes_nicaragua_debug.keystore.b64 > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+
+      - name: Audit package-specific runtime paths
+        shell: bash
+        run: |
+          if grep -R -n '/data/data/com.winlator' winlator/app/src/main --include='*.java' --include='*.h' --include='*.c' --include='*.cpp'; then
+            echo 'ERROR: stale com.winlator runtime path found'
+            exit 1
+          fi
+          if grep -R -n '"com.winlator.FileProvider"' winlator/app/src/main --include='*.java'; then
+            echo 'ERROR: stale FileProvider authority found'
+            exit 1
+          fi
+          grep -q 'v0.3.1-lowmem' winlator/app/src/main/java/com/winlator/PesLauncherActivity.java
+          grep -q 'GameArchiveInspector' winlator/app/src/main/java/com/winlator/PesLauncherActivity.java
+          if grep -R -n 'SevenZFile' winlator/app/src/main/java/com/winlator/GameArchiveInspector.java; then
+            echo 'ERROR: Java SevenZ decoder reintroduced into low-memory importer'
+            exit 1
+          fi
+
+      - name: Run importer unit tests
+        working-directory: winlator
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
+
+      - name: Build debug APK
+        working-directory: winlator
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/24.0.8215888"
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:assembleDebug
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p out
+          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.3.1-lowmem-debug.apk
+          sha256sum out/PES_Nicaragua_Android_v0.3.1-lowmem-debug.apk | tee out/SHA256SUMS.txt
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PES-Nicaragua-Android-v0.3.1-lowmem
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
