@@ -57,6 +57,26 @@ jobs:
           chmod 600 "$HOME/.android/debug.keystore"
           keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
 
+      - name: Audit package-specific runtime paths
+        shell: bash
+        run: |
+          if grep -R -n '/data/data/com.winlator' winlator/app/src/main --include='*.java' --include='*.h' --include='*.c' --include='*.cpp'; then
+            echo 'ERROR: stale com.winlator runtime path found'
+            exit 1
+          fi
+          if grep -R -n '"com.winlator.FileProvider"' winlator/app/src/main --include='*.java'; then
+            echo 'ERROR: stale FileProvider authority found'
+            exit 1
+          fi
+          grep -q 'v0.3.0-audit' winlator/app/src/main/java/com/winlator/PesLauncherActivity.java
+          grep -q 'GameArchiveInspector' winlator/app/src/main/java/com/winlator/PesLauncherActivity.java
+
+      - name: Run importer unit tests
+        working-directory: winlator
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
+
       - name: Build debug APK
         working-directory: winlator
         run: |
@@ -68,13 +88,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.2.5-debug.apk
-          sha256sum out/PES_Nicaragua_Android_v0.2.5-debug.apk | tee out/SHA256SUMS.txt
+          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.3.0-audit-debug.apk
+          sha256sum out/PES_Nicaragua_Android_v0.3.0-audit-debug.apk | tee out/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PES-Nicaragua-Android-v0.2.5
+          name: PES-Nicaragua-Android-v0.3.0-audit
           path: out/*
           if-no-files-found: error
           retention-days: 30
