@@ -12,8 +12,8 @@ def replace(path, old, new):
 
 # App identity
 replace('app/build.gradle', "applicationId 'com.winlator'", "applicationId 'com.pesnicaragua.android'")
-replace('app/build.gradle', 'versionCode 33', 'versionCode 1006')
-replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.4"')
+replace('app/build.gradle', 'versionCode 33', 'versionCode 1007')
+replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.5"')
 replace('app/src/main/res/values/strings.xml', '<string name="app_name">Winlator</string>', '<string name="app_name">PES Nicaragua</string>')
 replace('app/src/main/AndroidManifest.xml', 'android:authorities="com.winlator.FileProvider"', 'android:authorities="com.pesnicaragua.android.FileProvider"')
 replace('app/src/main/java/com/winlator/core/FileUtils.java', '"com.winlator.FileProvider"', 'activity.getPackageName()+".FileProvider"')
@@ -139,6 +139,7 @@ import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.StatFs;
 import android.provider.OpenableColumns;
@@ -201,6 +202,7 @@ public class PesLauncherActivity extends AppCompatActivity {
     private TextView gpuView;
     private Button playButton;
     private Button importButton;
+    private Button manualImportButton;
     private Button settingsButton;
     private Button technicalButton;
 
@@ -287,6 +289,15 @@ public class PesLauncherActivity extends AppCompatActivity {
         subtitle.setLayoutParams(subtitleParams);
         root.addView(subtitle);
 
+        TextView version = text("v0.2.5", 13, COLOR_MUTED);
+        version.setGravity(Gravity.CENTER_HORIZONTAL);
+        LinearLayout.LayoutParams versionParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+        versionParams.setMargins(0, 0, 0, dp(18));
+        version.setLayoutParams(versionParams);
+        root.addView(version);
+
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
         panel.setPadding(dp(18), dp(18), dp(18), dp(18));
@@ -302,9 +313,13 @@ public class PesLauncherActivity extends AppCompatActivity {
         gpuView = text("", 14, COLOR_MUTED);
         panel.addView(gpuView);
 
-        importButton = button("Importar / actualizar juego");
-        importButton.setOnClickListener(v -> chooseGamePackage());
+        importButton = button("Buscar juego en Descargas");
+        importButton.setOnClickListener(v -> findGameInDownloads());
         root.addView(importButton);
+
+        manualImportButton = button("Elegir archivo manualmente");
+        manualImportButton.setOnClickListener(v -> chooseGamePackage());
+        root.addView(manualImportButton);
 
         playButton = button("JUGAR");
         playButton.setTextSize(21);
@@ -318,7 +333,7 @@ public class PesLauncherActivity extends AppCompatActivity {
         root.addView(settingsButton);
 
         TextView help = text(
-                "Importa el ZIP de datos o el .7z original de PES 6. La app buscará pes6.exe automáticamente, preparará el entorno y después podrás entrar con JUGAR.",
+                "Primero toca Buscar juego en Descargas. La app localizará automáticamente el ZIP o .7z de PES 6. Si no lo encuentra, usa Elegir archivo manualmente.",
                 14, COLOR_MUTED);
         help.setPadding(0, dp(16), 0, dp(16));
         root.addView(help);
@@ -375,11 +390,13 @@ public class PesLauncherActivity extends AppCompatActivity {
         playButton.setEnabled(rootReady && gameReady);
         settingsButton.setEnabled(rootReady && gameReady);
         importButton.setEnabled(rootReady);
+        if (manualImportButton != null) manualImportButton.setEnabled(rootReady);
     }
 
     private void setMainButtonsEnabled(boolean enabled) {
         playButton.setEnabled(enabled);
         importButton.setEnabled(enabled);
+        if (manualImportButton != null) manualImportButton.setEnabled(enabled);
         settingsButton.setEnabled(enabled);
     }
 
@@ -397,6 +414,70 @@ public class PesLauncherActivity extends AppCompatActivity {
                 }
             }
         }, 1200);
+    }
+
+    private void findGameInDownloads() {
+        if (importInProgress) return;
+        statusView.setText("Buscando PES 6 en Descargas…");
+
+        executor.execute(() -> {
+            try {
+                ArrayList<File> roots = new ArrayList<>();
+                File publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                if (publicDownloads != null) roots.add(publicDownloads);
+                roots.add(new File("/storage/emulated/0/Download"));
+                roots.add(new File("/sdcard/Download"));
+
+                ArrayList<File> candidates = new ArrayList<>();
+                for (File root : roots) collectArchives(root, candidates, 2);
+
+                File best = null;
+                long bestScore = Long.MIN_VALUE;
+                for (File file : candidates) {
+                    String n = file.getName().toLowerCase(Locale.ENGLISH);
+                    long score = file.length();
+                    if (n.contains("pes")) score += 2_000_000_000L;
+                    if (n.contains("opti")) score += 1_000_000_000L;
+                    if (n.endsWith(".7z")) score += 500_000_000L;
+                    if (file.length() < 50L * 1024L * 1024L) score -= 5_000_000_000L;
+                    if (best == null || score > bestScore) {
+                        best = file;
+                        bestScore = score;
+                    }
+                }
+
+                final File found = best;
+                handler.post(() -> {
+                    if (found == null || !found.isFile()) {
+                        statusView.setText("No encontré un ZIP/7z de PES 6 en Descargas. Usa Elegir archivo manualmente.");
+                        return;
+                    }
+
+                    long mb = found.length() / (1024L * 1024L);
+                    statusView.setText("Encontrado: " + found.getName() + " (" + mb + " MB)\nIniciando importación…");
+                    importGamePackage(Uri.fromFile(found));
+                });
+            }
+            catch (Throwable e) {
+                writeCrashLog(e);
+                handler.post(() -> statusView.setText("No pude leer Descargas: " + e.getClass().getSimpleName() + ". Usa Elegir archivo manualmente."));
+            }
+        });
+    }
+
+    private void collectArchives(File dir, ArrayList<File> out, int depth) {
+        if (dir == null || depth < 0 || !dir.isDirectory()) return;
+        File[] files = dir.listFiles();
+        if (files == null) return;
+
+        for (File file : files) {
+            if (file.isDirectory()) {
+                collectArchives(file, out, depth - 1);
+                continue;
+            }
+            String name = file.getName().toLowerCase(Locale.ENGLISH);
+            if ((name.endsWith(".7z") || name.endsWith(".zip")) && file.canRead()) out.add(file);
+        }
     }
 
     private void registerImportLauncher() {
@@ -860,5 +941,5 @@ launcher_path = ROOT / 'app/src/main/java/com/winlator/PesLauncherActivity.java'
 launcher_path.write_text(launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
-marker.write_text('PES Nicaragua Android Runtime v0.2.4\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
-print('Applied PES Nicaragua Android v0.2.4 patch')
+marker.write_text('PES Nicaragua Android Runtime v0.2.5\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
+print('Applied PES Nicaragua Android v0.2.5 patch')
