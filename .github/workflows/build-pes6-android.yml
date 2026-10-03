@@ -68,8 +68,12 @@ jobs:
             echo 'ERROR: stale FileProvider authority found'
             exit 1
           fi
-          grep -q 'v0.3.0-audit' winlator/app/src/main/java/com/winlator/PesLauncherActivity.java
+          grep -q 'v0.3.1-lowmem' winlator/app/src/main/java/com/winlator/PesLauncherActivity.java
           grep -q 'GameArchiveInspector' winlator/app/src/main/java/com/winlator/PesLauncherActivity.java
+          if grep -R -n 'SevenZFile' winlator/app/src/main/java/com/winlator/GameArchiveInspector.java; then
+            echo 'ERROR: Java SevenZ decoder reintroduced into low-memory importer'
+            exit 1
+          fi
 
       - name: Run importer unit tests
         working-directory: winlator
@@ -88,13 +92,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.3.0-audit-debug.apk
-          sha256sum out/PES_Nicaragua_Android_v0.3.0-audit-debug.apk | tee out/SHA256SUMS.txt
+          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.3.1-lowmem-debug.apk
+          sha256sum out/PES_Nicaragua_Android_v0.3.1-lowmem-debug.apk | tee out/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PES-Nicaragua-Android-v0.3.0-audit
+          name: PES-Nicaragua-Android-v0.3.1-lowmem
           path: out/*
           if-no-files-found: error
           retention-days: 30
