@@ -68,13 +68,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.2.3-debug.apk
-          sha256sum out/PES_Nicaragua_Android_v0.2.3-debug.apk | tee out/SHA256SUMS.txt
+          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.2.4-debug.apk
+          sha256sum out/PES_Nicaragua_Android_v0.2.4-debug.apk | tee out/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PES-Nicaragua-Android-v0.2.3
+          name: PES-Nicaragua-Android-v0.2.4
           path: out/*
           if-no-files-found: error
           retention-days: 30
