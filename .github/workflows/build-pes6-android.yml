@@ -49,6 +49,14 @@ jobs:
       - name: Apply PES Nicaragua Android patch
         run: python3 ci/patch_winlator.py
 
+      - name: Install stable debug signing key
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android"
+          base64 -d ci/pes_nicaragua_debug.keystore.b64 > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+
       - name: Build debug APK
         working-directory: winlator
         run: |
@@ -60,13 +68,13 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.2.1-debug.apk
-          sha256sum out/PES_Nicaragua_Android_v0.2.1-debug.apk | tee out/SHA256SUMS.txt
+          cp winlator/app/build/outputs/apk/debug/app-debug.apk out/PES_Nicaragua_Android_v0.2.2-debug.apk
+          sha256sum out/PES_Nicaragua_Android_v0.2.2-debug.apk | tee out/SHA256SUMS.txt
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PES-Nicaragua-Android-v0.2.1
+          name: PES-Nicaragua-Android-v0.2.2
           path: out/*
           if-no-files-found: error
           retention-days: 30
