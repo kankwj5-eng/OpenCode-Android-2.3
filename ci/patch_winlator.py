@@ -12,8 +12,8 @@ def replace(path, old, new):
 
 # App identity
 replace('app/build.gradle', "applicationId 'com.winlator'", "applicationId 'com.pesnicaragua.android'")
-replace('app/build.gradle', 'versionCode 33', 'versionCode 1003')
-replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.1"')
+replace('app/build.gradle', 'versionCode 33', 'versionCode 1004')
+replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.2"')
 replace('app/src/main/res/values/strings.xml', '<string name="app_name">Winlator</string>', '<string name="app_name">PES Nicaragua</string>')
 replace('app/src/main/AndroidManifest.xml', 'android:authorities="com.winlator.FileProvider"', 'android:authorities="com.pesnicaragua.android.FileProvider"')
 replace('app/src/main/java/com/winlator/core/FileUtils.java', '"com.winlator.FileProvider"', 'activity.getPackageName()+".FileProvider"')
@@ -779,5 +779,5 @@ launcher_path = ROOT / 'app/src/main/java/com/winlator/PesLauncherActivity.java'
 launcher_path.write_text(launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
-marker.write_text('PES Nicaragua Android Runtime v0.2.1\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
-print('Applied PES Nicaragua Android v0.2.1 patch')
+marker.write_text('PES Nicaragua Android Runtime v0.2.2\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
+print('Applied PES Nicaragua Android v0.2.2 patch')
