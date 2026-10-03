@@ -1918,4 +1918,5 @@ launcher_path.write_text(audited_launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
 marker.write_text('PES Nicaragua Android Runtime v0.3.1-lowmem\nBase: Winlator 11.2\nLow-memory ZIP importer; 7z rejected before LZMA2 allocation; package-path fixes + tests.\n', encoding='utf-8')
-assert 'SevenZFile' not in inspector\nprint('Applied PES Nicaragua Android v0.3.1-lowmem patch')
+assert 'SevenZFile' not in inspector
+print('Applied PES Nicaragua Android v0.3.1-lowmem patch')
