@@ -12,8 +12,8 @@ def replace(path, old, new):
 
 # App identity
 replace('app/build.gradle', "applicationId 'com.winlator'", "applicationId 'com.pesnicaragua.android'")
-replace('app/build.gradle', 'versionCode 33', 'versionCode 1002')
-replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.0"')
+replace('app/build.gradle', 'versionCode 33', 'versionCode 1003')
+replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.2.1"')
 replace('app/src/main/res/values/strings.xml', '<string name="app_name">Winlator</string>', '<string name="app_name">PES Nicaragua</string>')
 replace('app/src/main/AndroidManifest.xml', 'android:authorities="com.winlator.FileProvider"', 'android:authorities="com.pesnicaragua.android.FileProvider"')
 replace('app/src/main/java/com/winlator/core/FileUtils.java', '"com.winlator.FileProvider"', 'activity.getPackageName()+".FileProvider"')
@@ -135,10 +135,12 @@ launcher = r'''package com.winlator;
 
 import android.app.Activity;
 import android.content.Intent;
+import android.database.Cursor;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
+import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -160,6 +162,8 @@ import com.winlator.xenvironment.RootFS;
 import com.winlator.xenvironment.RootFSInstaller;
 
 import org.json.JSONObject;
+import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry;
+import org.apache.commons.compress.archivers.sevenz.SevenZFile;
 
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -289,7 +293,7 @@ public class PesLauncherActivity extends AppCompatActivity {
         panel.addView(gpuView);
 
         importButton = button("Importar / actualizar juego");
-        importButton.setOnClickListener(v -> chooseGameZip());
+        importButton.setOnClickListener(v -> chooseGamePackage());
         root.addView(importButton);
 
         playButton = button("JUGAR");
@@ -304,7 +308,7 @@ public class PesLauncherActivity extends AppCompatActivity {
         root.addView(settingsButton);
 
         TextView help = text(
-                "Importa el ZIP de datos de PES Nicaragua. La app buscará pes6.exe automáticamente, preparará el entorno y después podrás entrar con JUGAR.",
+                "Importa el ZIP de datos o el .7z original de PES 6. La app buscará pes6.exe automáticamente, preparará el entorno y después podrás entrar con JUGAR.",
                 14, COLOR_MUTED);
         help.setPadding(0, dp(16), 0, dp(16));
         root.addView(help);
@@ -386,10 +390,15 @@ public class PesLauncherActivity extends AppCompatActivity {
         }, 1200);
     }
 
-    private void chooseGameZip() {
+    private void chooseGamePackage() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("application/zip");
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{
+                "application/zip",
+                "application/x-7z-compressed",
+                "application/octet-stream"
+        });
         startActivityForResult(intent, REQUEST_IMPORT);
     }
 
@@ -397,77 +406,46 @@ public class PesLauncherActivity extends AppCompatActivity {
     protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_IMPORT && resultCode == Activity.RESULT_OK && data != null && data.getData() != null) {
-            importGameZip(data.getData());
+            importGamePackage(data.getData());
         }
     }
 
-    private void importGameZip(Uri uri) {
+    private String getDisplayName(Uri uri) {
+        String result = null;
+        try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) result = cursor.getString(index);
+            }
+        }
+        catch (Exception ignored) {}
+        if (result == null || result.isEmpty()) result = uri.getLastPathSegment();
+        return result != null ? result : "paquete";
+    }
+
+    private void importGamePackage(Uri uri) {
         setMainButtonsEnabled(false);
         statusView.setText("Analizando paquete del juego…");
 
         executor.execute(() -> {
             File temp = new File(getBaseDir(), "PES6_importando");
+            File sevenZipTemp = new File(getBaseDir(), "PES6_importando.7z");
             deleteRecursive(temp);
+            deleteRecursive(sevenZipTemp);
             temp.mkdirs();
 
             try {
-                ArrayList<String> names = new ArrayList<>();
-                try (InputStream raw = getContentResolver().openInputStream(uri);
-                     ZipInputStream zin = new ZipInputStream(new BufferedInputStream(raw))) {
-                    ZipEntry entry;
-                    while ((entry = zin.getNextEntry()) != null) {
-                        String name = entry.getName().replace('\\', '/');
-                        if (!entry.isDirectory()) names.add(name);
-                    }
+                String displayName = getDisplayName(uri).toLowerCase(Locale.ENGLISH);
+                if (displayName.endsWith(".7z")) {
+                    handler.post(() -> statusView.setText("Copiando paquete .7z…"));
+                    copyUriToFile(uri, sevenZipTemp);
+                    importSevenZip(sevenZipTemp, temp);
+                }
+                else {
+                    importZip(uri, temp);
                 }
 
-                String prefix = findGamePrefix(names);
-                if (prefix == null) throw new Exception("El ZIP no contiene pes6.exe y dat/0_text.afs.");
-
-                int total = 0;
-                for (String name : names) if (name.startsWith(prefix)) total++;
-                final int totalFiles = Math.max(1, total);
-                int done = 0;
-
-                try (InputStream raw = getContentResolver().openInputStream(uri);
-                     ZipInputStream zin = new ZipInputStream(new BufferedInputStream(raw))) {
-                    ZipEntry entry;
-                    byte[] buffer = new byte[131072];
-                    String tempCanonical = temp.getCanonicalPath() + File.separator;
-
-                    while ((entry = zin.getNextEntry()) != null) {
-                        String name = entry.getName().replace('\\', '/');
-                        if (!name.startsWith(prefix)) continue;
-
-                        String relative = name.substring(prefix.length());
-                        if (relative.isEmpty()) continue;
-
-                        File out = new File(temp, relative);
-                        String outCanonical = out.getCanonicalPath();
-                        if (!outCanonical.startsWith(tempCanonical)) {
-                            throw new SecurityException("Ruta ZIP inválida");
-                        }
-
-                        if (entry.isDirectory()) {
-                            out.mkdirs();
-                            continue;
-                        }
-
-                        File parent = out.getParentFile();
-                        if (parent != null) parent.mkdirs();
-
-                        try (BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), 131072)) {
-                            int read;
-                            while ((read = zin.read(buffer)) != -1) bout.write(buffer, 0, read);
-                        }
-
-                        done++;
-                        if (done % 8 == 0 || done == totalFiles) {
-                            final int progress = Math.min(100, (done * 100) / totalFiles);
-                            handler.post(() -> statusView.setText("Importando juego… " + progress + "%"));
-                        }
-                    }
-                }
+                cleanLocalOnlyFiles(temp);
 
                 if (!isGameValid(temp)) throw new Exception("El paquete se extrajo, pero faltan archivos esenciales.");
 
@@ -481,6 +459,7 @@ public class PesLauncherActivity extends AppCompatActivity {
                     deleteRecursive(temp);
                 }
                 deleteRecursive(backup);
+                deleteRecursive(sevenZipTemp);
 
                 handler.post(() -> {
                     statusView.setText("Juego importado correctamente ✓");
@@ -492,12 +471,143 @@ public class PesLauncherActivity extends AppCompatActivity {
             }
             catch (Exception e) {
                 deleteRecursive(temp);
+                deleteRecursive(sevenZipTemp);
                 handler.post(() -> {
                     statusView.setText("No se pudo importar: " + e.getMessage());
                     refreshUi();
                 });
             }
         });
+    }
+
+    private void importZip(Uri uri, File temp) throws Exception {
+        ArrayList<String> names = new ArrayList<>();
+        try (InputStream raw = getContentResolver().openInputStream(uri);
+             ZipInputStream zin = new ZipInputStream(new BufferedInputStream(raw))) {
+            ZipEntry entry;
+            while ((entry = zin.getNextEntry()) != null) {
+                String name = entry.getName().replace('\\', '/');
+                if (!entry.isDirectory()) names.add(name);
+            }
+        }
+
+        String prefix = findGamePrefix(names);
+        if (prefix == null) throw new Exception("El ZIP no contiene pes6.exe y dat/0_text.afs.");
+
+        int total = 0;
+        for (String name : names) if (name.startsWith(prefix)) total++;
+        final int totalFiles = Math.max(1, total);
+        int done = 0;
+
+        try (InputStream raw = getContentResolver().openInputStream(uri);
+             ZipInputStream zin = new ZipInputStream(new BufferedInputStream(raw))) {
+            ZipEntry entry;
+            byte[] buffer = new byte[131072];
+            String tempCanonical = temp.getCanonicalPath() + File.separator;
+
+            while ((entry = zin.getNextEntry()) != null) {
+                String name = entry.getName().replace('\\', '/');
+                if (!name.startsWith(prefix)) continue;
+                String relative = name.substring(prefix.length());
+                if (relative.isEmpty()) continue;
+
+                File out = checkedOutputFile(temp, tempCanonical, relative);
+                if (entry.isDirectory()) {
+                    out.mkdirs();
+                    continue;
+                }
+
+                File parent = out.getParentFile();
+                if (parent != null) parent.mkdirs();
+                try (BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), 131072)) {
+                    int read;
+                    while ((read = zin.read(buffer)) != -1) bout.write(buffer, 0, read);
+                }
+
+                done++;
+                postImportProgress(done, totalFiles);
+            }
+        }
+    }
+
+    private void importSevenZip(File archive, File temp) throws Exception {
+        ArrayList<String> names = new ArrayList<>();
+        try (SevenZFile sevenZ = new SevenZFile(archive)) {
+            SevenZArchiveEntry entry;
+            while ((entry = sevenZ.getNextEntry()) != null) {
+                if (!entry.isDirectory() && entry.getName() != null) {
+                    names.add(entry.getName().replace('\\', '/'));
+                }
+            }
+        }
+
+        String prefix = findGamePrefix(names);
+        if (prefix == null) throw new Exception("El .7z no contiene la carpeta gamedata de PES 6.");
+
+        int total = 0;
+        for (String name : names) if (name.startsWith(prefix)) total++;
+        final int totalFiles = Math.max(1, total);
+        int done = 0;
+
+        try (SevenZFile sevenZ = new SevenZFile(archive)) {
+            SevenZArchiveEntry entry;
+            byte[] buffer = new byte[131072];
+            String tempCanonical = temp.getCanonicalPath() + File.separator;
+
+            while ((entry = sevenZ.getNextEntry()) != null) {
+                if (entry.getName() == null) continue;
+                String name = entry.getName().replace('\\', '/');
+                if (!name.startsWith(prefix)) continue;
+                String relative = name.substring(prefix.length());
+                if (relative.isEmpty()) continue;
+
+                File out = checkedOutputFile(temp, tempCanonical, relative);
+                if (entry.isDirectory()) {
+                    out.mkdirs();
+                    continue;
+                }
+
+                File parent = out.getParentFile();
+                if (parent != null) parent.mkdirs();
+                try (BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), 131072)) {
+                    int read;
+                    while ((read = sevenZ.read(buffer)) > 0) bout.write(buffer, 0, read);
+                }
+
+                done++;
+                postImportProgress(done, totalFiles);
+            }
+        }
+    }
+
+    private File checkedOutputFile(File temp, String tempCanonical, String relative) throws Exception {
+        File out = new File(temp, relative);
+        String outCanonical = out.getCanonicalPath();
+        if (!outCanonical.startsWith(tempCanonical)) throw new SecurityException("Ruta del paquete inválida");
+        return out;
+    }
+
+    private void postImportProgress(int done, int total) {
+        if (done % 8 == 0 || done == total) {
+            final int progress = Math.min(100, (done * 100) / Math.max(1, total));
+            handler.post(() -> statusView.setText("Importando juego… " + progress + "%"));
+        }
+    }
+
+    private void copyUriToFile(Uri uri, File out) throws Exception {
+        try (InputStream in = new BufferedInputStream(getContentResolver().openInputStream(uri), 131072);
+             BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), 131072)) {
+            byte[] buffer = new byte[131072];
+            int read;
+            while ((read = in.read(buffer)) != -1) bout.write(buffer, 0, read);
+        }
+    }
+
+    private void cleanLocalOnlyFiles(File root) {
+        deleteRecursive(new File(root, "bonus"));
+        deleteRecursive(new File(root, "scripts/6Fixes.asi"));
+        deleteRecursive(new File(root, "scripts/6Fixes.ini"));
+        deleteRecursive(new File(root, "scripts/optiprojects.asi"));
     }
 
     private String findGamePrefix(ArrayList<String> names) {
@@ -669,5 +779,5 @@ launcher_path = ROOT / 'app/src/main/java/com/winlator/PesLauncherActivity.java'
 launcher_path.write_text(launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
-marker.write_text('PES Nicaragua Android Runtime v0.2\nBase: Winlator 11.2\nDedicated launcher + ZIP importer + auto container + touch controls.\n', encoding='utf-8')
-print('Applied PES Nicaragua Android v0.2 patch')
+marker.write_text('PES Nicaragua Android Runtime v0.2.1\nBase: Winlator 11.2\nDedicated launcher + ZIP/7z importer + auto container + touch controls.\n', encoding='utf-8')
+print('Applied PES Nicaragua Android v0.2.1 patch')
