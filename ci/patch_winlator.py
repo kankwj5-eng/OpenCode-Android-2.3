@@ -12,8 +12,8 @@ def replace(path, old, new):
 
 # App identity
 replace('app/build.gradle', "applicationId 'com.winlator'", "applicationId 'com.pesnicaragua.android'")
-replace('app/build.gradle', 'versionCode 33', 'versionCode 1100')
-replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.3.0-audit"')
+replace('app/build.gradle', 'versionCode 33', 'versionCode 1101')
+replace('app/build.gradle', 'versionName "11.2"', 'versionName "0.3.1-lowmem"')
 replace('app/src/main/res/values/strings.xml', '<string name="app_name">Winlator</string>', '<string name="app_name">PES Nicaragua</string>')
 replace('app/src/main/AndroidManifest.xml', 'android:authorities="com.winlator.FileProvider"', 'android:authorities="com.pesnicaragua.android.FileProvider"')
 replace('app/src/main/java/com/winlator/core/FileUtils.java', '"com.winlator.FileProvider"', 'activity.getPackageName()+".FileProvider"')
@@ -187,9 +187,6 @@ import com.winlator.xenvironment.RootFS;
 import com.winlator.xenvironment.RootFSInstaller;
 
 import org.json.JSONObject;
-import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry;
-import org.apache.commons.compress.archivers.sevenz.SevenZFile;
-
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -1037,7 +1034,10 @@ public final class GameArchiveInspector {
 
     public static Inspection inspect(File archive) throws IOException {
         ArchiveType type = detectType(archive);
-        List<EntryMeta> entries = type == ArchiveType.ZIP ? listZip(archive) : listSevenZ(archive);
+        if (type == ArchiveType.SEVEN_Z) {
+            throw new IOException("7z desactivado por seguridad de memoria: este formato puede exigir un diccionario LZMA2 de cientos de MiB. Usa el ZIP de datos de PES Nicaragua.");
+        }
+        List<EntryMeta> entries = listZip(archive);
         String prefix = findGamePrefix(entries);
         if (prefix == null) {
             throw new IOException("No encontré pes6.exe junto con dat/0_text.afs, dat/e_text.afs y dat/e_sound.afs.");
@@ -1061,8 +1061,10 @@ public final class GameArchiveInspector {
         if (!outputDir.mkdirs() && !outputDir.isDirectory()) {
             throw new IOException("No pude crear la carpeta temporal del juego.");
         }
-        if (inspection.type == ArchiveType.ZIP) extractZip(archive, inspection, outputDir, callback);
-        else extractSevenZ(archive, inspection, outputDir, callback);
+        if (inspection.type != ArchiveType.ZIP) {
+            throw new IOException("Solo se admite ZIP para la extracción de bajo consumo de memoria.");
+        }
+        extractZip(archive, inspection, outputDir, callback);
     }
 
     static String findGamePrefixForTest(Collection<String> names) {
@@ -1107,17 +1109,6 @@ public final class GameArchiveInspector {
         return result;
     }
 
-    private static List<EntryMeta> listSevenZ(File archive) throws IOException {
-        List<EntryMeta> result = new ArrayList<>();
-        try (SevenZFile sevenZ = new SevenZFile(archive)) {
-            SevenZArchiveEntry entry;
-            while ((entry = sevenZ.getNextEntry()) != null) {
-                result.add(new EntryMeta(normalize(entry.getName()), entry.getSize(), entry.isDirectory()));
-            }
-        }
-        return result;
-    }
-
     private static void extractZip(File archive, Inspection inspection, File outputDir, ProgressCallback callback) throws IOException {
         long written = 0;
         byte[] buffer = new byte[128 * 1024];
@@ -1143,38 +1134,6 @@ public final class GameArchiveInspector {
                      BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), buffer.length)) {
                     int read;
                     while ((read = in.read(buffer)) != -1) {
-                        bout.write(buffer, 0, read);
-                        written += read;
-                        if (callback != null) callback.onProgress(written, inspection.totalUncompressedBytes);
-                    }
-                }
-            }
-        }
-    }
-
-    private static void extractSevenZ(File archive, Inspection inspection, File outputDir, ProgressCallback callback) throws IOException {
-        long written = 0;
-        byte[] buffer = new byte[128 * 1024];
-        try (SevenZFile sevenZ = new SevenZFile(archive)) {
-            SevenZArchiveEntry entry;
-            while ((entry = sevenZ.getNextEntry()) != null) {
-                String name = normalize(entry.getName());
-                if (!name.startsWith(inspection.prefix)) continue;
-                String relative = name.substring(inspection.prefix.length());
-                if (relative.isEmpty() || shouldSkip(relative)) continue;
-
-                File out = safeTarget(outputDir, relative);
-                if (entry.isDirectory()) {
-                    if (!out.mkdirs() && !out.isDirectory()) throw new IOException("No pude crear " + relative);
-                    continue;
-                }
-
-                File parent = out.getParentFile();
-                if (parent != null && !parent.mkdirs() && !parent.isDirectory()) throw new IOException("No pude crear " + parent.getName());
-
-                try (BufferedOutputStream bout = new BufferedOutputStream(new FileOutputStream(out), buffer.length)) {
-                    int read;
-                    while ((read = sevenZ.read(buffer)) > 0) {
                         bout.write(buffer, 0, read);
                         written += read;
                         if (callback != null) callback.onProgress(written, inspection.totalUncompressedBytes);
@@ -1291,13 +1250,20 @@ public class GameArchiveInspectorTest {
     }
 
     @Test
-    public void detectsSevenZSignature() throws Exception {
+    public void rejectsSevenZBeforeDecoderAllocation() throws Exception {
         File temp = File.createTempFile("pes6-7z-", ".bin");
         try {
             try (FileOutputStream out = new FileOutputStream(temp)) {
                 out.write(new byte[]{0x37,0x7a,(byte)0xbc,(byte)0xaf,0x27,0x1c,0,0});
             }
             assertEquals(GameArchiveInspector.ArchiveType.SEVEN_Z, GameArchiveInspector.detectType(temp));
+            try {
+                GameArchiveInspector.inspect(temp);
+                fail("7z must be rejected before decoder allocation");
+            }
+            catch (java.io.IOException expected) {
+                assertTrue(expected.getMessage().contains("7z desactivado"));
+            }
         }
         finally {
             temp.delete();
@@ -1358,7 +1324,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class PesLauncherActivity extends AppCompatActivity {
-    private static final String VERSION = "v0.3.0-audit";
+    private static final String VERSION = "v0.3.1-lowmem";
     private static final String CONTAINER_NAME = "PES Nicaragua";
     private static final int COLOR_BG = 0xff11161c;
     private static final int COLOR_PANEL = 0xff1b222b;
@@ -1469,12 +1435,10 @@ public class PesLauncherActivity extends AppCompatActivity {
         gpuView.setLayoutParams(gpuParams);
         panel.addView(gpuView);
 
-        importButton = button("Importar ZIP / 7z");
+        importButton = button("Importar ZIP");
         importButton.setOnClickListener(v -> openDocumentLauncher.launch(new String[]{
                 "application/zip",
-                "application/x-7z-compressed",
                 "application/octet-stream",
-                "application/x-compressed",
                 "*/*"
         }));
         root.addView(importButton);
@@ -1499,7 +1463,7 @@ public class PesLauncherActivity extends AppCompatActivity {
         root.addView(technicalButton);
 
         TextView help = text(
-                "El importador copia primero el archivo elegido al almacenamiento privado, detecta ZIP/7z por su firma, extrae solo gamedata y valida PES 6 antes de reemplazar la copia anterior.",
+                "Usa el ZIP de datos de PES Nicaragua. El 7z original queda bloqueado porque en este teléfono pide un diccionario LZMA2 de 256 MiB y supera el heap de Android. El ZIP se extrae por streaming con memoria baja.",
                 14, COLOR_MUTED);
         LinearLayout.LayoutParams helpParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -1694,6 +1658,11 @@ public class PesLauncherActivity extends AppCompatActivity {
                 copyUriToLocal(uri, localArchive, size);
                 log("COPY", "copiado=" + localArchive.length());
 
+                GameArchiveInspector.ArchiveType detectedType = GameArchiveInspector.detectType(localArchive);
+                log("TYPE", "detectado=" + detectedType + " heapMax=" + Runtime.getRuntime().maxMemory());
+                if (detectedType == GameArchiveInspector.ArchiveType.SEVEN_Z) {
+                    throw new Exception("El 7z original no es compatible con el límite de memoria de este teléfono. Usa el ZIP viejo/de datos.");
+                }
                 GameArchiveInspector.Inspection inspection = GameArchiveInspector.inspect(localArchive);
                 log("INSPECT", "type=" + inspection.type + " prefix=" + inspection.prefix +
                         " files=" + inspection.fileCount + " bytes=" + inspection.totalUncompressedBytes);
@@ -1951,5 +1920,5 @@ public class PesLauncherActivity extends AppCompatActivity {
 launcher_path.write_text(audited_launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
-marker.write_text('PES Nicaragua Android Runtime v0.3.0-audit\nBase: Winlator 11.2\nAudited SAF importer + package-path fixes + import tests.\n', encoding='utf-8')
-print('Applied PES Nicaragua Android v0.3.0-audit patch')
+marker.write_text('PES Nicaragua Android Runtime v0.3.1-lowmem\nBase: Winlator 11.2\nLow-memory ZIP importer; 7z rejected before LZMA2 allocation; package-path fixes + tests.\n', encoding='utf-8')
+print('Applied PES Nicaragua Android v0.3.1-lowmem patch')
