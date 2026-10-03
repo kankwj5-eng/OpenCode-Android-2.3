@@ -962,9 +962,6 @@ launcher_path.write_text(launcher, encoding='utf-8')
 # Pure-Java archive inspector used by the audited importer and CI tests.
 inspector = r'''package com.winlator;
 
-import org.apache.commons.compress.archivers.sevenz.SevenZArchiveEntry;
-import org.apache.commons.compress.archivers.sevenz.SevenZFile;
-
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
@@ -1921,4 +1918,4 @@ launcher_path.write_text(audited_launcher, encoding='utf-8')
 
 marker = ROOT / 'PES_NICARAGUA_BUILD.txt'
 marker.write_text('PES Nicaragua Android Runtime v0.3.1-lowmem\nBase: Winlator 11.2\nLow-memory ZIP importer; 7z rejected before LZMA2 allocation; package-path fixes + tests.\n', encoding='utf-8')
-print('Applied PES Nicaragua Android v0.3.1-lowmem patch')
+assert 'SevenZFile' not in inspector\nprint('Applied PES Nicaragua Android v0.3.1-lowmem patch')
